@@ -1,0 +1,42 @@
+# .gitignore for QuikBankAccountBalancer
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+ENV/
+
+# Пользовательские данные и конфиги
+targets.json
+direct_portfolio.txt
+*.log
+*.tmp
+*.cache
+
+# Платформо-зависимые файлы
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Пользовательские файлы
+*.pyc
+__pycache__/
+
+# Потенциальные временные файлы
+*.bak
+*.old
+*.new
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# Windows
+~*.tmp
+~*.tmp.*
