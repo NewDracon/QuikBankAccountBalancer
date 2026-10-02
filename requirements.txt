@@ -1,0 +1,5 @@
+# Core dependencies (pinned for Python 3.11/3.12 compatibility)
+numpy==1.26.4
+pandas==2.2.2
+plotly==5.22.0
+streamlit==1.37.0

@@ -1,0 +1,28 @@
+[project]
+name = "quik-portfolio-balancer"
+version = "0.1.0"
+description = "Анализатор портфеля трейдера QUIK с ребалансировкой"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "numpy==1.26.4",
+    "pandas==2.2.2",
+    "plotly==5.22.0",
+    "streamlit==1.37.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+dev-dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
