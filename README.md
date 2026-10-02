@@ -56,6 +56,8 @@
 
 Если в окне сообщений QUIK выдаст **QUIK# is waiting for client connection...**, то скрипт запущен успешно.
 
+Библиотеку QuikPy можно также установить напрямую с GitHub: https://github.com/cia76/QuikPy
+
 ## Запуск
 
 После установки запустите приложение:
