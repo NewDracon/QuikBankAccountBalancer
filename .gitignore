@@ -7,6 +7,8 @@ env/
 ENV/
 
 # Пользовательские данные и конфиги
+do_not_push/
+notes/
 targets.json
 direct_portfolio.txt
 *.log
@@ -40,3 +42,7 @@ __pycache__/
 # Windows
 ~*.tmp
 ~*.tmp.*
+
+# Документация и конфигурационные файлы
+PROJECT_NOTES.md
+uv.lock

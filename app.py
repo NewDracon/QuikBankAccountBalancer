@@ -107,6 +107,33 @@ def find_price(qp, sec_code: str, user_classes: set) -> Tuple[Optional[str], flo
     return None, 0.0
 
 
+def get_futures_contract_value(qp_provider, sec_code: str, class_code: str = 'SPBFUT') -> float:
+    """Возвращает стоимость одного фьючерсного контракта в рублях (номинал базового актива) или 0.0, если не удалось получить."""
+    try:
+        si = qp_provider.get_symbol_info(class_code, sec_code)
+        if not si:
+            return 0.0
+        min_price_step = float(si.get('min_price_step', 0))
+        if min_price_step <= 0:
+            return 0.0
+
+        last_price_resp = qp_provider.get_param_ex(class_code, sec_code, 'LAST')
+        step_price_resp = qp_provider.get_param_ex(class_code, sec_code, 'STEPPRICE')
+        
+        if not (last_price_resp and 'data' in last_price_resp and step_price_resp and 'data' in step_price_resp):
+            return 0.0
+            
+        last_price = float(last_price_resp['data'].get('param_value', 0))
+        step_price = float(step_price_resp['data'].get('param_value', 0))
+
+        if last_price > 0 and step_price > 0:
+            # Стоимость одного контракта в рублях
+            return last_price / min_price_step * step_price
+    except Exception:
+        pass
+    return 0.0
+
+
 def get_futures_go(qp_provider, sec_code: str, class_code: str = 'SPBFUT'):
     go_buy = go_sell = None
     for pn in ('BUYDEPO', 'buydepo'):
@@ -611,10 +638,15 @@ def load_targets() -> dict:
 
 def save_targets(d: dict) -> bool:
     try:
+        # Добавим отладку
+        print("DEBUG: Сохраняемые цели:", json.dumps(d, ensure_ascii=False, indent=2, default=str))
         with open(TARGETS_FILE, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2, default=str)
+        print("DEBUG: Сохранение завершено успешно")
         return True
-    except Exception: return False
+    except Exception as e:
+        print(f"DEBUG: Ошибка сохранения целей: {e}")
+        return False
 
 def _default_targets() -> dict:
     d = {
@@ -773,17 +805,28 @@ def page_analysis():
                     st.info("Загрузка из QUIK...")
                     try:
                         with QuikPy() as qp:
-                            data_file = fetch_portfolio_directly(qp)
-                            if data_file and os.path.exists(data_file):
-                                with open(data_file, 'r', encoding='utf-8') as f:
+                            result = fetch_portfolio_directly(qp)
+                            st.info(f"Функция вернула: {result}")
+                            st.info(f"Путь к файлу: {DIRECT_DATA_FILE}")
+                            st.info(f"Файл существует: {os.path.exists(DIRECT_DATA_FILE)}")
+                            if os.path.exists(DIRECT_DATA_FILE):
+                                with open(DIRECT_DATA_FILE, 'r', encoding='utf-8') as f:
                                     text = f.read()
+                                st.info(f"Читаем файл, размер: {len(text)} символов")
                                 st.session_state.raw_portfolio_text = text
                                 st.session_state.targets = load_targets()
-                                st.success("✅ Данные из QUIK загружены!")
+                                st.success("✅ Данные из QUIК загружены!")
                             else:
-                                st.error("Не удалось получить данные из QUIK")
+                                st.error("Не удалось получить данные из QUIК")
+                                # Проверим, существует ли директория
+                                if DIRECT_DATA_FILE.parent.exists():
+                                    st.info(f"Директория существует: {DIRECT_DATA_FILE.parent}")
+                                else:
+                                    st.error(f"Директория не существует: {DIRECT_DATA_FILE.parent}")
                     except Exception as e:
                         st.error(f"Ошибка: {e}")
+                        import traceback
+                        st.error(f"Трассировка: {traceback.format_exc()}")
                     st.rerun()
 
         with col_b:
@@ -978,38 +1021,113 @@ def page_analysis():
         st.subheader("📊 Фьючерсы — структура обеспечения")
 
         # ── Математика ─────────────────────────────────────────────
-        # Оба пира имеют ОДИНАКОВЫЙ общий объём = nominal фьючерса
-        #   ТЕКУЩЕЕ:  ГО (QUIK) + Буфер_текущий (cash − ГО) + Распределённая
-        #   ЦЕЛЕВОЕ:  ГО (QUIK) + Буфер_целевой (nom × %) + Распределённая
-        # Все три сектора в каждом пире дают ровно nominal.
+        # ТЕКУЩАЯ структура обеспечения:
+        #   - Номинал = Номинал из отчета (total_fut_nominal)
+        #   - ГО = ГО из QUIK-отчета (total_fut_margin)
+        #   - Буфер текущий = Номинал × buffer_pct% (настройка, по умолчанию 15%)
+        #   - Распределённая ликвидность = Номинал - ГО - Буфер текущий
+        #
+        # ЦЕЛЕВАЯ структура обеспечения:
+        #   - Номинал = значение "Фьючерсы" из целевого распределения (futures_target_value)
+        #   - Буфер целевой = Номинал × buffer_pct% (настройка)
+        #   - Номинал 1 контракта = total_fut_nominal / total_qty (из отчета)
+        #   - ГО 1 контракта = total_fut_margin / total_qty (из отчета)
+        #   - Целевое кол-во контрактов = Номинал (целевой) / Номинал 1 контракта
+        #   - Целевое ГО = Целевое кол-во контрактов × ГО 1 контракта
+        #   - Распределённая ликвидность = Номинал - Целевое ГО - Буфер целевой
+        #   - Если целевое кол-во ≠ кол-во по отчету → рекомендовать сделку
         # ────────────────────────────────────────────────────────────
 
-        total = fc["total_nominal"]
-        go_val = fc["total_fut_margin"]
-        buf_target = fc["buffer_amount"]
+        buffer_pct = float(targets.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT))
 
-        buf_current_raw = round(fc["sur_available"] - go_val, 2)
-        buf_current = max(buf_current_raw, 0.0)
-        distributed_current = round(total - go_val - buf_current, 2)
-        if distributed_current < 0:
-            distributed_current = 0.0
-            buf_current = round(total - go_val, 2)
+        # --- Расчет на 1 контракт (из отчета) ---
+        total_qty = sum(abs(f["qty"]) for f in fc["per_future"])
+        if total_qty > 0:
+            nominal_per_contract = fc["total_nominal"] / total_qty
+            go_per_contract = fc["total_fut_margin"] / total_qty
+        else:
+            nominal_per_contract = 0
+            go_per_contract = 0
 
-        distributed_target = round(total - go_val - buf_target, 2)
-        if distributed_target < 0:
-            distributed_target = 0.0
-            buf_target = round(total - go_val, 2)
+        # --- ТЕКУЩАЯ структура ---
+        cur_nominal = fc["total_nominal"]
+        cur_go = fc["total_fut_margin"]
+        cur_buffer = round(cur_nominal * buffer_pct / 100.0, 2)
+        cur_distributed = round(cur_nominal - cur_go - cur_buffer, 2)
+        if cur_distributed < 0:
+            cur_distributed = 0.0
+            cur_buffer = round(cur_nominal - cur_go, 2)
+
+        # --- ЦЕЛЕВАЯ структура ---
+        tgt_nominal = cur_nominal  # default
+        futures_class_index = None
+        try:
+            futures_class_index = cl.index("Фьючерсы")
+            if futures_class_index is not None and futures_class_index < len(cl):
+                futures_target_value = tgt_vals[futures_class_index]
+                if futures_target_value > 0:
+                    tgt_nominal = futures_target_value
+        except (ValueError, IndexError):
+            pass
+
+        tgt_buffer = round(tgt_nominal * buffer_pct / 100.0, 2)
+
+        # Целевое количество контрактов (с округлением вниз, так как контракты целые)
+        if nominal_per_contract > 0:
+            target_contracts = int(tgt_nominal / nominal_per_contract)
+        else:
+            target_contracts = 0
+
+        # Целевое ГО = целевое кол-во контрактов × ГО на 1 контракт
+        tgt_go = round(target_contracts * go_per_contract, 2)
+
+        tgt_distributed = round(tgt_nominal - tgt_go - tgt_buffer, 2)
+        if tgt_distributed < 0:
+            tgt_distributed = 0.0
+            tgt_buffer = round(tgt_nominal - tgt_go, 2)
+
+        # --- Рекомендации по фьючерсам ---
+        # Если целевое кол-во контрактов отличается от фактического — рекомендуем сделку
+        futures_recs = []
+        if total_qty > 0 and target_contracts != total_qty:
+            diff_contracts = target_contracts - total_qty
+            action = "Покупка" if diff_contracts > 0 else "Продажа"
+            # Распределяем по тикерам (если один тикер — весь объем на него)
+            if len(fc["per_future"]) == 1:
+                sec_code = fc["per_future"][0]["sec_code"]
+                futures_recs.append({
+                    "sec_code": sec_code,
+                    "action": action,
+                    "qty_change": abs(diff_contracts),
+                    "current_qty": total_qty,
+                    "target_qty": target_contracts
+                })
+            else:
+                # Пороговые изменения пропорционально текущим позициям
+                for fut in fc["per_future"]:
+                    prop = abs(fut["qty"]) / total_qty if total_qty > 0 else 0
+                    chg = int(round(diff_contracts * prop))
+                    if chg != 0:
+                        act = "Покупка" if chg > 0 else "Продажа"
+                        futures_recs.append({
+                            "sec_code": fut["sec_code"],
+                            "action": act,
+                            "qty_change": abs(chg),
+                            "current_qty": int(abs(fut["qty"])),
+                            "target_qty": int(abs(fut["qty"])) + chg
+                        })
 
         cur_labels = ["ГО (из QUIK)", "Буфер текущий", "Распределённая ликвидность"]
-        cur_values = [round(go_val, 2), round(buf_current, 2), round(distributed_current, 2)]
-        tgt_labels = ["ГО (из QUIK)", "Буфер целевой", "Распределённая ликвидность"]
-        tgt_values = [round(go_val, 2), round(buf_target, 2), round(distributed_target, 2)]
+        cur_values = [round(cur_go, 2), round(cur_buffer, 2), round(cur_distributed, 2)]
+        tgt_labels = ["ГО (рассчитанное)", "Буфер целевой", "Распределённая ликвидность"]
+        tgt_values = [round(tgt_go, 2), round(tgt_buffer, 2), round(tgt_distributed, 2)]
 
         sector_colors_map = {
             "ГО (из QUIK)": "#d35400",
             "Буфер текущий": "#f39c12",
             "Распределённая ликвидность": "#2ecc71",
             "Буфер целевой": "#f39c12",
+            "ГО (рассчитанное)": "#d35400",
         }
         cu_colors = [sector_colors_map[l] for l in cur_labels]
         tu_colors = [sector_colors_map[l] for l in tgt_labels]
@@ -1053,29 +1171,49 @@ def page_analysis():
                 f"<div style='border:1px solid #ddd;border-radius:8px;"
                 f"padding:10px;margin-top:8px;background:#fafafa'>"
                 f"<b>📊 Текущая (₽)</b><br>"
-                f"Номинал: <b>{total:,.2f} ₽</b><br>"
+                f"Номинал: <b>{cur_nominal:,.2f} ₽</b><br>"
                 f"• ГО (QUIK): <span style='color:#d35400'>●</span> "
-                f"{go_val:,.2f} ₽ ({go_val/total*100:.1f}%)<br>"
-                f"• Буфер: <span style='color:#f39c12'>●</span> "
-                f"{buf_current:,.2f} ₽ ({buf_current/total*100:.1f}%)<br>"
+                f"{cur_go:,.2f} ₽ ({cur_go/cur_nominal*100:.1f}%)<br>"
+                f"• Буфер ({buffer_pct:.0f}%): <span style='color:#f39c12'>●</span> "
+                f"{cur_buffer:,.2f} ₽ ({cur_buffer/cur_nominal*100:.1f}%)<br>"
                 f"• Ликвидность: <span style='color:#2ecc71'>●</span> "
-                f"{distributed_current:,.2f} ₽ ({distributed_current/total*100:.1f}%)</div>",
+                f"{cur_distributed:,.2f} ₽ ({cur_distributed/cur_nominal*100:.1f}%)</div>",
                 unsafe_allow_html=True)
         with lcol2:
             st.markdown(
                 f"<div style='border:1px solid #ddd;border-radius:8px;"
                 f"padding:10px;margin-top:8px;background:#fafafa'>"
                 f"<b>🎯 Целевая (₽)</b><br>"
-                f"Номинал: <b>{total:,.2f} ₽</b><br>"
-                f"• ГО (QUIK): <span style='color:#d35400'>●</span> "
-                f"{go_val:,.2f} ₽ ({go_val/total*100:.1f}%)<br>"
-                f"• Буфер ({float(targets.get('futures_buffer_pct', DEFAULT_FUTURES_BUFFER_PCT))}%): "
-                f"<span style='color:#f39c12'>●</span> {buf_target:,.2f} ₽ "
-                f"({buf_target/total*100:.1f}%)<br>"
+                f"Номинал: <b>{tgt_nominal:,.2f} ₽</b><br>"
+                f"• ГО ({target_contracts} конт. × {go_per_contract:,.2f}): "
+                f"<span style='color:#d35400'>●</span> "
+                f"{tgt_go:,.2f} ₽ ({tgt_go/tgt_nominal*100:.1f}%)<br>"
+                f"• Буфер ({buffer_pct:.0f}%): "
+                f"<span style='color:#f39c12'>●</span> {tgt_buffer:,.2f} ₽ "
+                f"({tgt_buffer/tgt_nominal*100:.1f}%)<br>"
                 f"• Ликвидность: <span style='color:#2ecc71'>●</span> "
-                f"{distributed_target:,.2f} ₽ "
-                f"({distributed_target/total*100:.1f}%)</div>",
+                f"{tgt_distributed:,.2f} ₽ "
+                f"({tgt_distributed/tgt_nominal*100:.1f}%)</div>",
                 unsafe_allow_html=True)
+
+        # ── Рекомендуемые сделки по фьючерсам ──
+        if futures_recs:
+            st.markdown("### 📋 Рекомендуемые сделки по фьючерсам")
+            rec_rows = []
+            for rec in futures_recs:
+                rec_rows.append({
+                    "Тикер": rec["sec_code"],
+                    "Текущее кол-во": rec["current_qty"],
+                    "Целевое кол-во": rec["target_qty"],
+                    "Действие": rec["action"],
+                    "Изменение контрактов": rec["qty_change"]
+                })
+            df_rec = pd.DataFrame(rec_rows)
+            st.dataframe(df_rec.style.map(
+                lambda v: "background:#2ecc71;color:#fff;font-weight:bold;" if v == "Покупка" else
+                ("background:#e74c3c;color:#fff;font-weight:bold;" if v == "Продажа" else ""),
+                subset=["Действие"]),
+                use_container_width=True, hide_index=True)
 
     # ═══════════════════════════════════════════════════════════════
     # СВОДНАЯ ТАБЛИЦА ПО КЛАССАМ
@@ -1203,13 +1341,16 @@ def page_targets_editor():
     st.caption("Управление распределением по классам активов, инструментами и настройками фьючерсов.")
 
     if "targets" not in st.session_state: st.session_state.targets = load_targets()
+    # Загрузка данных редактора
     if "parsed" not in st.session_state: st.session_state.parsed = None
+    if "targets" not in st.session_state: st.session_state.targets = load_targets()
 
     tgt = st.session_state.targets
     parsed = st.session_state.parsed
 
     editor_classes = dict(tgt.get("classes", {}))
     editor_tickers = tgt.get("tickers", {}).copy()
+    
     overlay_classes = tgt.get("futures_overlay_classes", OVERLAY_DEFAULT_CLASSES[:])
     buffer_pct = float(tgt.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT))
 
@@ -1269,8 +1410,11 @@ def page_targets_editor():
                     nc = st.session_state._pending_new_class
                     del st.session_state._pending_new_class
                     editor_classes[nc] = 0.0
+                # Сохраняем классы, сохраняя тикеры из session_state
                 current = load_targets()
                 current["classes"] = editor_classes
+                # Важно: сохраняем текущие тикеры из session_state, а не из файла
+                current["tickers"] = st.session_state.targets.get("tickers", {})
                 st.session_state.targets = current
                 save_targets(current); st.rerun()
     with btn_row[1]:
@@ -1295,6 +1439,7 @@ def page_targets_editor():
                     with row[0]:
                         if st.button("🗑", key=f"del_{cls_name}_{tk}"):
                             del editor_tickers.setdefault(cls_name, {})[tk]
+                            st.session_state.targets["tickers"] = editor_tickers
                             st.rerun()
                     with row[1]:
                         st.write(tk)
@@ -1304,13 +1449,16 @@ def page_targets_editor():
                                            label_visibility="collapsed", max_chars=20)
                         if nn and nn != tk:
                             editor_tickers[cls_name][nn] = editor_tickers[cls_name].pop(tk)
+                            st.session_state.targets["tickers"] = editor_tickers
                             st.rerun()
                     with row[3]:
                         tv = st.number_input(
                             "", min_value=0.0, max_value=100.0,
                             value=float(ct[tk]), step=0.5, format="%.1f",
                             key=f"tc_tick_{cls_name}_{tk}", label_visibility="visible")
+                        # Обновляем данные в session_state, чтобы они сохранялись
                         editor_tickers[cls_name][tk] = tv
+                        st.session_state.targets["tickers"] = editor_tickers
 
                 s = sum(editor_tickers[cls_name].values())
                 if abs(s - 100.0) > 0.1:
@@ -1332,10 +1480,11 @@ def page_targets_editor():
                                          value=0.0, step=0.5, key=f"add_wt_{cls_name}",
                                          format="%.1f")
             with inp_row[3]:
-                if st.button("➕ Добавить", use_container_width=True, key=f"add_btn_{cls_name}"):
+                if st.button("<- Добавить введенное", use_container_width=True, key=f"add_btn_{cls_name}"):
                     if new_tk:
                         if cls_name not in editor_tickers: editor_tickers[cls_name] = {}
                         editor_tickers[cls_name][new_tk] = new_wt
+                        st.session_state.targets["tickers"] = editor_tickers
                         st.rerun()
 
             # Подтяжка из портфеля
@@ -1352,6 +1501,7 @@ def page_targets_editor():
                             if t not in existing:
                                 editor_tickers[cls_name][t] = 0.0
                                 existing.add(t)
+                        st.session_state.targets["tickers"] = editor_tickers
                         st.rerun()
 
     # ── Кнопки сохранения всей секции B ──
@@ -1359,20 +1509,29 @@ def page_targets_editor():
     btn_cols = st.columns(4)
     with btn_cols[0]:
         if st.button("💾 Сохранить все цели", use_container_width=True):
+            # Используем введённые пользователем веса, нормализуя только если сумма ≠ 100%
             final_tickers = {}
             for cn, td in editor_tickers.items():
-                if not td: continue
-                ks = sorted(td.keys())
-                n = len(ks)
-                w = round(100.0 / n, 2)
-                diff = 100.0 - w * n
-                final_tickers[cn] = {}
-                for i, k in enumerate(ks):
-                    final_tickers[cn][k] = round(w + (diff if i == n - 1 else 0), 2)
+                if not td:
+                    continue
+                # Считаем сумму текущих весов
+                total = sum(td.values())
+                if abs(total - 100.0) > 0.01:
+                    # Нормализуем пропорционально введённым весам
+                    factor = 100.0 / total
+                    final_tickers[cn] = {k: round(v * factor, 2) for k, v in td.items()}
+                    # Корректируем последний, чтобы сумма была ровно 100%
+                    ks = list(final_tickers[cn].keys())
+                    diff = 100.0 - sum(final_tickers[cn].values())
+                    if ks:
+                        final_tickers[cn][ks[-1]] = round(final_tickers[cn][ks[-1]] + diff, 2)
+                else:
+                    # Веса уже в сумме дают 100% — оставляем как есть
+                    final_tickers[cn] = {k: round(v, 2) for k, v in td.items()}
 
             final_tgt = {
                 "classes": editor_classes,
-                "tickers": {k: v for k, v in final_tickers.items()},
+                "tickers": final_tickers,
                 "futures_overlay_classes": overlay_classes,
                 "futures_buffer_pct": buffer_pct,
             }
@@ -1393,7 +1552,7 @@ def page_targets_editor():
         if st.button("📤 Экспорт targets.json", use_container_width=True):
             d = st.download_button(
                 label="Скачать JSON",
-                data=json.dumps(load_targets(), ensure_ascii=False, indent=2).encode(),
+                data=json.dumps(st.session_state.targets, ensure_ascii=False, indent=2, default=str).encode(),
                 file_name="targets.json",
                 mime="application/json")
 
