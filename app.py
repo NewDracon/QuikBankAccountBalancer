@@ -553,7 +553,7 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
     skipped = {}
 
     for cn, cd in class_store.items():
-        if cn in ("Золото", "Ликвидность", "Фьючерсы"): continue
+        if cn in ("Ликвидность", "Фьючерсы"): continue
         tgt_cls_pct = classes_data.get(cn, 0)
         tgt_list = tickers_targets.get(cn, {})
         if not tgt_list:
@@ -846,6 +846,14 @@ def page_analysis():
                     st.session_state.pending_portfolio_text = None
                     st.session_state.targets = load_targets()
                     st.rerun()
+
+        if DIRECT_DATA_FILE.exists():
+            if st.button("Последние данные из QUIK", use_container_width=True):
+                with open(DIRECT_DATA_FILE, encoding="utf-8") as f:
+                    text = f.read()
+                st.session_state.raw_portfolio_text = text
+                st.session_state.targets = load_targets()
+                st.rerun()
 
         if TEST_DATA_FILE.exists():
             if st.button("🧪 Тестовые данные", use_container_width=True):

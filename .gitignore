@@ -7,6 +7,7 @@ env/
 ENV/
 
 # Пользовательские данные и конфиги
+.dsh-code-index/
 do_not_push/
 notes/
 targets.json
@@ -45,4 +46,5 @@ __pycache__/
 
 # Документация и конфигурационные файлы
 PROJECT_NOTES.md
+setup_and_run_guide.md
 uv.lock
