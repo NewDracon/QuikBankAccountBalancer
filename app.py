@@ -760,9 +760,9 @@ def fmt_pct(pct):
 
 def _row_action_style(val):
     if isinstance(val, str):
-        if val == "buy":
+        if val == "BUY":
             return "background:#27ae60;color:#000000;font-weight:bold;border-radius:6px;padding:2px 10px;"
-        if val == "sell":
+        if val == "SELL":
             return "background:#e74c3c;color:#000000;font-weight:bold;border-radius:6px;padding:2px 10px;"
     return ""
 
@@ -1236,11 +1236,11 @@ def page_analysis():
         # Стоимость — уже число, формируем строку
         val_str = f"{cs.get('total', 0):,.2f}"
         action = d.get("action", "")
-        # Преобразуем buy/sell в цветные BYE/SELL
+        # Преобразуем buy/sell в цветные BYE/SELL (стиль применяется через style.map)
         if action == "buy":
-            action_display = "<span style='color:#27ae60;font-weight:bold;'>BYE</span>"
+            action_display = "BUY"
         elif action == "sell":
-            action_display = "<span style='color:#e74c3c;font-weight:bold;'>SELL</span>"
+            action_display = "SELL"
         else:
             action_display = ""
         rows.append({"Класс": c,
@@ -1251,9 +1251,8 @@ def page_analysis():
                      "Объём сделки (руб.)": f"{d.get('volume', 0):,.2f}",
                      "Действие": action_display})
     df_cl = pd.DataFrame(rows)
-    # Используем format для рендеринга HTML в колонке Действие
-    styled_cl = df_cl.style.format({"Действие": lambda x: x})
-    st.dataframe(styled_cl, use_container_width=True, hide_index=True, height=300)
+    st.dataframe(df_cl.style.map(_row_action_style, subset=["Действие"]),
+                 use_container_width=True, hide_index=True, height=300)
 
     # ═══════════════════════════════════════════════════════════════
     # ДЕТАЛИЗАЦИЯ ПО КЛАССАМ
@@ -1365,6 +1364,12 @@ def page_targets_editor():
     # Загрузка данных редактора
     if "parsed" not in st.session_state: st.session_state.parsed = None
     if "targets" not in st.session_state: st.session_state.targets = load_targets()
+    
+    # Инициализация состояния для отслеживания изменений
+    if "targets_edited" not in st.session_state:
+        st.session_state.targets_edited = False
+    if "initial_targets" not in st.session_state:
+        st.session_state.initial_targets = load_targets()
 
     tgt = st.session_state.targets
     parsed = st.session_state.parsed
@@ -1383,12 +1388,14 @@ def page_targets_editor():
             buffer_pct = st.number_input(
                 "🛡 Процент буфера от номинала (%)",
                 min_value=0.0, max_value=50.0, value=buffer_pct, step=0.5,
-                format="%.1f", key="edit_buf_pct")
+                format="%.1f", key="edit_buf_pct",
+                on_change=lambda: setattr(st.session_state, 'targets_edited', True))
         with c2:
             st.markdown("**Overlay-классы** (куда распределяется излишек ликвидности):")
             overlay_classes = st.multiselect(
                 "", options=OVERLAY_DEFAULT_CLASSES,
-                default=overlay_classes, key="edit_overlay_cls")
+                default=overlay_classes, key="edit_overlay_cls",
+                on_change=lambda: setattr(st.session_state, 'targets_edited', True))
         with c3:
             st.empty()
 
@@ -1405,7 +1412,8 @@ def page_targets_editor():
             f"{_get_class_icon(cls_name)} {cls_name}",
             min_value=0.0, max_value=100.0,
             value=float(editor_classes.get(cls_name, 0)), step=0.5,
-            label_visibility="visible", key=f"tc_{cls_name}")
+            label_visibility="visible", key=f"tc_{cls_name}",
+            on_change=lambda: setattr(st.session_state, 'targets_edited', True))
         editor_classes[cls_name] = val
         idx += 1
 
@@ -1437,6 +1445,7 @@ def page_targets_editor():
                 # Важно: сохраняем текущие тикеры из session_state, а не из файла
                 current["tickers"] = st.session_state.targets.get("tickers", {})
                 st.session_state.targets = current
+                st.session_state.targets_edited = False  # Сброс флага изменений
                 save_targets(current); st.rerun()
     with btn_row[1]:
         if st.button("🔄 Сбросить к дефолту", use_container_width=True):
@@ -1559,6 +1568,7 @@ def page_targets_editor():
             st.session_state.targets = final_tgt
             if save_targets(final_tgt):
                 st.success("✅ Все цели сохранены! Перейдите на страницу Анализ.")
+                st.session_state.targets_edited = False  # Сброс флага изменений
                 st.session_state._needs_recalc = True
                 st.rerun()
     with btn_cols[1]:
@@ -1591,6 +1601,43 @@ def _get_class_icon(cls_name):
     return "📦"
 
 
+def _targets_equal(targets1, targets2):
+    """Сравнивает два набора целей на равенство"""
+    if not targets1 or not targets2:
+        return targets1 == targets2
+    
+    # Сравниваем классы
+    classes1 = targets1.get("classes", {})
+    classes2 = targets2.get("classes", {})
+    if classes1 != classes2:
+        return False
+    
+    # Сравниваем тикеры
+    tickers1 = targets1.get("tickers", {})
+    tickers2 = targets2.get("tickers", {})
+    if tickers1 != tickers2:
+        return False
+    
+    # Сравниваем параметры фьючерсов
+    futures_overlay1 = targets1.get("futures_overlay_classes", [])
+    futures_overlay2 = targets2.get("futures_overlay_classes", [])
+    if futures_overlay1 != futures_overlay2:
+        return False
+    
+    buffer1 = targets1.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT)
+    buffer2 = targets2.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT)
+    if buffer1 != buffer2:
+        return False
+    
+    return True
+
+# ════════════════════════════════════════════════════════════════════════════
+# MAIN — навигация
+# ════════════════════════════════════════════════════════════════════════════
+
+page_names = {"Анализ": page_analysis, "Редактор целей": page_targets_editor}
+pages = {name: fn for name, fn in page_names.items()}
+
 # ════════════════════════════════════════════════════════════════════════════
 # MAIN — навигация
 # ════════════════════════════════════════════════════════════════════════════
@@ -1599,13 +1646,43 @@ page_names = {"Анализ": page_analysis, "Редактор целей": page
 pages = {name: fn for name, fn in page_names.items()}
 
 def app():
+    # Инициализация состояния
+    if "initial_targets" not in st.session_state:
+        st.session_state.initial_targets = load_targets()
+    if "targets" not in st.session_state:
+        st.session_state.targets = load_targets()
+    if "targets_edited" not in st.session_state:
+        st.session_state.targets_edited = False
+    
     nav_choice = st.sidebar.radio(
         "📑 Навигация",
         options=list(pages.keys()),
         index=0,
         help="Выберите страницу")
-
-    pages[nav_choice]()
+    
+    # Проверяем, если пользователь пытается перейти с редактора целей на анализ
+    # и есть несохраненные изменения
+    if (nav_choice == "Анализ" and
+        st.session_state.targets_edited):
+        # Показываем предупреждение
+        st.warning("У вас есть несохраненные изменения в редакторе целей!")
+        st.info("Пожалуйста, сохраните изменения нажав кнопку 'Сохранить все цели' или отмените изменения.")
+        
+        # Кнопки для подтверждения перехода
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("❌ Отменить изменения"):
+                st.session_state.targets = st.session_state.initial_targets.copy()
+                st.session_state.targets_edited = False
+                st.rerun()
+        with col2:
+            if st.button("✅ Продолжить без сохранения"):
+                st.session_state.targets = st.session_state.initial_targets.copy()
+                st.session_state.targets_edited = False
+                pages[nav_choice]()
+                return
+    else:
+        pages[nav_choice]()
 
 if __name__ == "__main__":
     app()
