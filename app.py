@@ -761,16 +761,16 @@ def fmt_pct(pct):
 def _row_action_style(val):
     if isinstance(val, str):
         if val == "buy":
-            return "background:#2ecc71;color:#fff;font-weight:bold;border-radius:6px;padding:2px 10px;"
+            return "background:#27ae60;color:#000000;font-weight:bold;border-radius:6px;padding:2px 10px;"
         if val == "sell":
-            return "background:#e74c3c;color:#fff;font-weight:bold;border-radius:6px;padding:2px 10px;"
+            return "background:#e74c3c;color:#000000;font-weight:bold;border-radius:6px;padding:2px 10px;"
     return ""
 
 def _action_text_style(val):
     if val == "Покупка":
-        return "background:#2ecc71;color:#fff;font-weight:bold;"
+        return "background:#27ae60;color:#000000;font-weight:bold;"
     if val == "Продажа":
-        return "background:#e74c3c;color:#fff;font-weight:bold;"
+        return "background:#e74c3c;color:#000000;font-weight:bold;"
     return ""
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1218,8 +1218,8 @@ def page_analysis():
                 })
             df_rec = pd.DataFrame(rec_rows)
             st.dataframe(df_rec.style.map(
-                lambda v: "background:#2ecc71;color:#fff;font-weight:bold;" if v == "Покупка" else
-                ("background:#e74c3c;color:#fff;font-weight:bold;" if v == "Продажа" else ""),
+                lambda v: "background:#27ae60;color:#000000;font-weight:bold;" if v == "Покупка" else
+                ("background:#e74c3c;color:#000000;font-weight:bold;" if v == "Продажа" else ""),
                 subset=["Действие"]),
                 use_container_width=True, hide_index=True)
 
@@ -1235,15 +1235,24 @@ def page_analysis():
         cs = result["class_store"].get(c, {})
         # Стоимость — уже число, формируем строку
         val_str = f"{cs.get('total', 0):,.2f}"
+        action = d.get("action", "")
+        # Преобразуем buy/sell в цветные BYE/SELL
+        if action == "buy":
+            action_display = "<span style='color:#27ae60;font-weight:bold;'>BYE</span>"
+        elif action == "sell":
+            action_display = "<span style='color:#e74c3c;font-weight:bold;'>SELL</span>"
+        else:
+            action_display = ""
         rows.append({"Класс": c,
                      "Стоимость (руб.)": val_str,
                      "Текущий %": f"{cw.get(c, 0):.2f}",
                      "Целевой %": f"{result['classes_data'].get(c, 0):.2f}",
                      "Отклонение": f"{d.get('deviation', 0):+.2f}",
                      "Объём сделки (руб.)": f"{d.get('volume', 0):,.2f}",
-                     "Действие": d.get("action", "")})
+                     "Действие": action_display})
     df_cl = pd.DataFrame(rows)
-    styled_cl = df_cl.style.map(_row_action_style, subset=["Действие"])
+    # Используем format для рендеринга HTML в колонке Действие
+    styled_cl = df_cl.style.format({"Действие": lambda x: x})
     st.dataframe(styled_cl, use_container_width=True, hide_index=True, height=300)
 
     # ═══════════════════════════════════════════════════════════════
@@ -1258,14 +1267,16 @@ def page_analysis():
         td = {(kc, k): v for (kc, k), v in result["ticker_devs"].items() if kc == c}
         sk_items = [(kc, k) for (kc, k) in result["skipped"].keys() if kc == c]
 
+        buys = sum(1 for v in td.values() if v["action"] == "Покупка")
+        sells = sum(1 for v in td.values() if v["action"] == "Продажа")
         exp_label = f"**{c}** — {cs.get('total', 0):,.0f} руб. "
         if td:
-            buys = sum(1 for v in td.values() if v["action"] == "Покупка")
-            sells = sum(1 for v in td.values() if v["action"] == "Продажа")
-            exp_label += f"[{buys} 🟢 / {sells} 🔴]"
+            exp_label += f"[{buys} <span style='color:#27ae60;font-weight:bold;'>BYE</span> / {sells} <span style='color:#e74c3c;font-weight:bold;'>SELL</span>]"
         exp_label += f" ({len(cs['tickers'])} тикеров)"
 
-        with st.expander(exp_label, expanded=False):
+        # Используем markdown для заголовка с HTML, затем expander для контента
+        st.markdown(exp_label, unsafe_allow_html=True)
+        with st.expander("Детали", expanded=False):
             if td:
                 trows = []
                 for (_, tkr), dv in td.items():
@@ -1300,25 +1311,27 @@ def page_analysis():
     for (cn, tkr), dv in result["ticker_devs"].items():
         if dv["action"] == "Покупка":
             buy_rows.append({"Тикер": tkr, "Класс": cn,
-                             "Действие": "ПОКУПКА 🟢",
+                             "Действие": "ПОКУПКА BYE",
                              "Разница (руб.)": f"{abs(dv['diff']):,.2f}",
                              "Кол-во": dv["qty_change"]})
         elif dv["action"] == "Продажа":
             sell_rows.append({"Тикер": tkr, "Класс": cn,
-                              "Действие": "ПРОДАЖА 🔴",
+                              "Действие": "ПРОДАЖА SELL",
                               "Разница (руб.)": f"{abs(dv['diff']):,.2f}",
                               "Кол-во": dv["qty_change"]})
 
     if buy_rows:
-        st.markdown("##### 🟢 Покупка")
+        st.markdown("##### <span style='color:#27ae60;font-weight:bold;'>BYE</span> Покупка", unsafe_allow_html=True)
         st.dataframe(pd.DataFrame(buy_rows).style.map(
-            lambda _: "background:#2ecc71;color:#fff;font-weight:bold;",
+            lambda val: "background:#27ae60;color:#000000;font-weight:bold;" if val == "ПОКУПКА BYE" else
+            ("background:#27ae60;color:#000000;font-weight:bold;" if val == "BYE" else ""),
             subset=["Действие"]), use_container_width=True, hide_index=True,
             height=min(len(buy_rows) * 38 + 60, 250))
     if sell_rows:
-        st.markdown("##### 🔴 Продажа")
+        st.markdown("##### <span style='color:#e74c3c;font-weight:bold;'>SELL</span> Продажа", unsafe_allow_html=True)
         st.dataframe(pd.DataFrame(sell_rows).style.map(
-            lambda _: "background:#e74c3c;color:#fff;font-weight:bold;",
+            lambda val: "background:#e74c3c;color:#000000;font-weight:bold;" if val == "ПРОДАЖА SELL" else
+            ("background:#e74c3c;color:#000000;font-weight:bold;" if val == "SELL" else ""),
             subset=["Действие"]), use_container_width=True, hide_index=True,
             height=min(len(sell_rows) * 38 + 60, 250))
     if not buy_rows and not sell_rows:
