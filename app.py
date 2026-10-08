@@ -492,38 +492,14 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
             "qty": next((i["grams"] for i in raw["free_cash"] if i["type"] == "gold"), None),
             "price": gp, "unit": "г", "value": gold_val})
 
-    # Остаток свободных (sur_val − nominal фьючерсов), если положительный — отдельный класс
-    # Если surplus < nominal — класс "Ликвидность" не показывается вовсе,
-    # а недостающее покрывается сектором "Распределённая ликвидность" в пирах фьючерсов.
-    actual_sur_remainder = round(sur_val - total_fut_nominal, 2)
-    if actual_sur_remainder >= 0:
-        add_ticker("Ликвидность", {"sec": "SUR", "name": "Свободные средства (остаток)",
-            "qty": None, "price": 1.0, "value": actual_sur_remainder})
+    # Ликвидность для фьючерсов — просто денежная ликвидность из отчета (SUR)
+    # Заменяет собой особый расчет и класс "Фьючерсы" в левой диаграмме
+    if sur_val > 0:
+        add_ticker("Ликв. для фьючерсов", {"sec": "SUR", "name": "Ликвидность для фьючерсов",
+            "qty": None, "price": 1.0, "value": sur_val})
 
-    # ГО фьючерсов — отдельный элемент внутри ликвидности (или как часть ликвидности)
-    if total_fut_margin > 0:
-        if "Ликвидность" not in class_store:
-            class_store["Ликвидность"] = {"total": 0.0, "tickers": {}}
-        class_store["Ликвидность"]["tickers"]["GO_FUT"] = {
-            "sec": "GO_FUT", "name": f"ГО фьючерсов ({total_fut_margin:,.0f} ₽)",
-            "qty": None, "price": 1.0, "value": total_fut_margin}
-        class_store["Ликвидность"]["total"] += total_fut_margin
-
-    if fut_buffer_amount > 0:
-        if "Ликвидность" not in class_store:
-            class_store["Ликвидность"] = {"total": 0.0, "tickers": {}}
-        class_store["Ликвидность"]["tickers"]["BUFFER"] = {
-            "sec": "BUFFER", "name": f"Буфер фьючерсов ({fut_buffer_amount:,.0f} ₽)",
-            "qty": None, "price": 1.0, "value": fut_buffer_amount}
-        class_store["Ликвидность"]["total"] += fut_buffer_amount
-
-    # Фьючерсы по номиналу
-    if total_fut_nominal > 0:
-        for fut in raw["futures"]:
-            ticker_class_map[fut["sec_code"]] = "Фьючерсы"
-            add_ticker("Фьючерсы", {"sec": fut["sec_code"], "name": fut["name"],
-                "qty": fut["qty"], "price": fut["price"], "value": fut["notional"],
-                "contract_value": fut["contract_value"], "go": fut["go"]})
+    # Фьючерсы НЕ включаем в левую диаграмму "Текущее распределение"
+    # (они будут в правой диаграмме целевом и в разделе фьючерсов)
 
     # Предупреждения
     for sec, cls in ticker_class_map.items():
@@ -553,7 +529,7 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
     skipped = {}
 
     for cn, cd in class_store.items():
-        if cn in ("Ликвидность", "Фьючерсы"): continue
+        if cn in ("Ликвидность", "Фьючерсы", "Ликв. для фьючерсов"): continue
         tgt_cls_pct = classes_data.get(cn, 0)
         tgt_list = tickers_targets.get(cn, {})
         if not tgt_list:
@@ -605,7 +581,7 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
         "sur_val": sur_val, "notional": notional, "go": go,
         "total_fut_nominal": total_fut_nominal, "total_fut_margin": total_fut_margin,
         "fut_buffer_amount": fut_buffer_amount, "fut_required_liquidity": fut_required_liquidity,
-        "actual_sur_remainder": actual_sur_remainder,
+        "actual_sur_remainder": sur_val,
         "class_store": class_store, "class_weights": class_weights,
         "all_classes": all_classes, "class_devs": class_devs,
         "ticker_devs": ticker_devs, "skipped": skipped,
@@ -1592,7 +1568,7 @@ def page_targets_editor():
 _CLASS_ICONS = {
     "ОФЗ": "🏛️", "Корп. облигации": "🏢", "Акции РФ": "📈",
     "ETF": "💎", "Золото": "🥇", "Фьючерсы": "📊",
-    "Ликвидность": "💵",
+    "Ликвидность": "💵", "Ликв. для фьючерсов": "📊",
 }
 
 def _get_class_icon(cls_name):
