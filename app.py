@@ -1284,13 +1284,16 @@ def page_analysis():
 
     buy_rows, sell_rows = [], []
     for (cn, tkr), dv in result["ticker_devs"].items():
+        # Получаем название тикера
+        info = result["class_store"].get(cn, {}).get("tickers", {}).get(tkr, {})
+        name = info.get("name", "-")
         if dv["action"] == "Покупка":
-            buy_rows.append({"Тикер": tkr, "Класс": cn,
+            buy_rows.append({"Тикер": tkr, "Название": name, "Класс": cn,
                              "Действие": "ПОКУПКА BYE",
                              "Разница (руб.)": f"{abs(dv['diff']):,.2f}",
                              "Кол-во": dv["qty_change"]})
         elif dv["action"] == "Продажа":
-            sell_rows.append({"Тикер": tkr, "Класс": cn,
+            sell_rows.append({"Тикер": tkr, "Название": name, "Класс": cn,
                               "Действие": "ПРОДАЖА SELL",
                               "Разница (руб.)": f"{abs(dv['diff']):,.2f}",
                               "Кол-во": dv["qty_change"]})
@@ -1311,6 +1314,29 @@ def page_analysis():
             height=min(len(sell_rows) * 38 + 60, 250))
     if not buy_rows and not sell_rows:
         st.info("Портфель сбалансирован. Изменений не требуется.")
+
+    # Подпункт "Нет целей - продать" — лишние тикеры, которых нет в целях
+    no_goal_rows = []
+    for (cn, tkr), msg in result.get("skipped", {}).items():
+        info = result.get("class_store", {}).get(cn, {}).get("tickers", {}).get(tkr, {})
+        name = info.get("name", "-")
+        cur_val = info.get("value", 0)
+        qty = info.get("qty", "-")
+        no_goal_rows.append({
+            "Тикер": tkr,
+            "Название": name,
+            "Класс": cn,
+            "Стоимость (руб.)": f"{cur_val:,.2f}" if isinstance(cur_val, (int, float)) else "-",
+            "Кол-во": qty if qty is not None else "-",
+            "Причина": msg,
+        })
+    if no_goal_rows:
+        st.markdown("##### <span style='color:#888888;font-weight:bold;'>Нет целей - продать</span>", unsafe_allow_html=True)
+        st.dataframe(
+            pd.DataFrame(no_goal_rows).style.map(
+                lambda v: "background:#aaaaaa;color:#555555;"),
+            use_container_width=True, hide_index=True,
+            height=min(len(no_goal_rows) * 38 + 60, 250))
 
     # Таблица фьючерсов
     if fc["per_future"]:
