@@ -430,6 +430,8 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
     tickers_targets = targets.get("tickers", {})
     buffer_pct = float(targets.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT))
     overlay_cls = targets.get("futures_overlay_classes", OVERLAY_DEFAULT_CLASSES)
+    min_dev_pct = targets.get("min_deviation_pct", {cls: 1.0 for cls in classes_data.keys()})
+    min_trans_rub = targets.get("min_transaction_rub", {cls: 10000.0 for cls in classes_data.keys()})
 
     fund_total = raw["fund_total"]
     gold_val = sum(i.get("value_rub", 0) for i in raw["free_cash"] if i["type"] == "gold")
@@ -519,10 +521,27 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
         cur = round(class_weights.get(cn, 0), 2)
         tgt = round(classes_data.get(cn, 0), 2)
         dev = round(cur - tgt, 2)
+        
+        # Проверка на существенное отклонение
+        # Условие 1: отклонение (в %) выше минимального процента
+        # Условие 2: абсолютная стоимость отклонения выше минимальной суммы сделки
+        cur_val_raw = class_store.get(cn, {}).get("total", 0)
+        equity_val = equity
+        
+        # Абсолютная стоимость отклонения в рублях
+        dev_abs_rub = round(abs(dev) / 100 * equity_val, 2) if dev != 0 else 0.0
+        
+        # Условие 1: процент отклонения (в %) превышает минимальный процент
+        condition1 = abs(dev) > min_dev_pct.get(cn, 1.0)
+        # Условие 2: абсолютная стоимость отклонения в рублях превышает минимальную сумму
+        condition2 = dev_abs_rub > min_trans_rub.get(cn, 10000.0)
+        
+        is_substantial = condition1 and condition2
+        
         act = "buy" if dev < -0.5 else ("sell" if dev > 0.5 else "hold")
-        vol = round(abs(dev) / 100 * equity, 2) if dev != 0 else 0.0
+        vol = round(abs(dev) / 100 * equity_val, 2) if dev != 0 else 0.0
         class_devs[cn] = {"current": cur, "target": tgt, "deviation": dev,
-                          "action": act, "volume": vol}
+                          "action": act, "volume": vol, "is_substantial": is_substantial}
 
     # ── Детализация по тикерам (только не-спецклассы) ──
     ticker_devs = {}
@@ -608,6 +627,10 @@ def load_targets() -> dict:
             if "tickers" not in d: d["tickers"] = {}
             if "futures_overlay_classes" not in d: d["futures_overlay_classes"] = OVERLAY_DEFAULT_CLASSES[:]
             if "futures_buffer_pct" not in d: d["futures_buffer_pct"] = DEFAULT_FUTURES_BUFFER_PCT
+            if "min_deviation_pct" not in d:
+                d["min_deviation_pct"] = {cls: 1.0 for cls in d.get("classes", DEFAULT_CLASSES)}
+            if "min_transaction_rub" not in d:
+                d["min_transaction_rub"] = {cls: 10000.0 for cls in d.get("classes", DEFAULT_CLASSES)}
             return d
         except Exception: pass
     return _default_targets()
@@ -626,9 +649,12 @@ def save_targets(d: dict) -> bool:
 
 def _default_targets() -> dict:
     d = {
-        "classes": DEFAULT_CLASSES.copy(), "tickers": {},
+        "classes": DEFAULT_CLASSES.copy(), 
+        "tickers": {},
         "futures_overlay_classes": OVERLAY_DEFAULT_CLASSES[:],
         "futures_buffer_pct": DEFAULT_FUTURES_BUFFER_PCT,
+        "min_deviation_pct": {cls: 1.0 for cls in DEFAULT_CLASSES},
+        "min_transaction_rub": {cls: 10000.0 for cls in DEFAULT_CLASSES},
     }
     save_targets(d); return d
 
@@ -645,6 +671,18 @@ def build_ticker_defaults_from_portfolio(raw_data: dict) -> dict:
         tgts["tickers"].setdefault("Фьючерсы", {})
         if fut["sec_code"] not in tgts["tickers"]["Фьючерсы"]:
             tgts["tickers"]["Фьючерсы"][fut["sec_code"]] = 0
+    # Инициализируем min_deviation_pct для новых классов
+    if "min_deviation_pct" not in tgts:
+        tgts["min_deviation_pct"] = {}
+    for cls in tgts["tickers"]:
+        if cls not in tgts["min_deviation_pct"]:
+            tgts["min_deviation_pct"][cls] = 1.0
+    # Инициализируем min_transaction_rub для новых классов
+    if "min_transaction_rub" not in tgts:
+        tgts["min_transaction_rub"] = {}
+    for cls in tgts.get("tickers", {}):
+        if cls not in tgts["min_transaction_rub"]:
+            tgts["min_transaction_rub"][cls] = 10000.0
     for cls, tk_dict in tgts["tickers"].items():
         zero_keys = [k for k, v in tk_dict.items() if v == 0]
         n = len(zero_keys)
@@ -904,10 +942,17 @@ def page_analysis():
         cols_sum = st.columns(n_cols)
         for i, c in enumerate(cl):
             dv = result["class_devs"].get(c, {}).get("deviation", 0)
+            is_sub = result["class_devs"].get(c, {}).get("is_substantial", False)
+            
+            # Для существенного отклонения — красная стрелка (inverse), для обычного — обычная (normal)
+            delta_text = f"{dv:+.1f}%"
+            delta_color = "inverse" if is_sub else ("normal" if dv <= 0 else "inverse")
+            delta_display = delta_text if is_sub or (abs(dv) > 0.05) else None
+            
             cols_sum[i % n_cols].metric(
                 c, f"{cw.get(c, 0):.1f}%",
-                delta=f"{dv:+.1f}%" if abs(dv) > 0.05 else None,
-                delta_color="normal" if dv <= 0 else "inverse")
+                delta=delta_display,
+                delta_color=delta_color)
 
     # Информация по фьючерсам
     fc = result["fut_chart_data"]
@@ -1212,13 +1257,20 @@ def page_analysis():
         # Стоимость — уже число, формируем строку
         val_str = f"{cs.get('total', 0):,.2f}"
         action = d.get("action", "")
-        # Преобразуем buy/sell в цветные BYE/SELL (стиль применяется через style.map)
-        if action == "buy":
-            action_display = "BUY"
-        elif action == "sell":
-            action_display = "SELL"
+        is_substantial = d.get("is_substantial", False)
+        
+        # Показываем действие только при существенном отклонении
+        if is_substantial:
+            # Преобразуем buy/sell в цветные BYE/SELL (стиль применяется через style.map)
+            if action == "buy":
+                action_display = "BUY"
+            elif action == "sell":
+                action_display = "SELL"
+            else:
+                action_display = ""
         else:
-            action_display = ""
+            action_display = ""  # пустое действие при НЕсущественном отклонении
+            
         rows.append({"Класс": c,
                      "Стоимость (руб.)": val_str,
                      "Текущий %": f"{cw.get(c, 0):.2f}",
@@ -1226,8 +1278,16 @@ def page_analysis():
                      "Отклонение": f"{d.get('deviation', 0):+.2f}",
                      "Объём сделки (руб.)": f"{d.get('volume', 0):,.2f}",
                      "Действие": action_display})
+    
+    # Применяем выделение строки, только если отклонение существенное
+    def highlight_row(row):
+        # Выделяем только строки с существенными отклонениями (непустое действие)
+        if row["Действие"]:  # непустое действие = существенное отклонение
+            return ["background-color:#ff9999;color:#000000;font-weight:bold;" for _ in row]
+        return ["" for _ in range(len(row))]
+    
     df_cl = pd.DataFrame(rows)
-    st.dataframe(df_cl.style.map(_row_action_style, subset=["Действие"]),
+    st.dataframe(df_cl.style.apply(highlight_row, axis=1),
                  use_container_width=True, hide_index=True, height=300)
 
     # ═══════════════════════════════════════════════════════════════
@@ -1406,18 +1466,47 @@ def page_targets_editor():
     st.subheader("1. Распределение по классам активов")
     st.caption("Сумма должна быть равна 100%")
 
-    cols_c = st.columns(4)
-    idx = 0
+    # Инициализируем min_deviation_pct и min_transaction_rub, если их нет
+    if "min_deviation_pct" not in tgt:
+        tgt["min_deviation_pct"] = {cls: 1.0 for cls in editor_classes}
+    editor_min_dev = dict(tgt.get("min_deviation_pct", {}))
+    if "min_transaction_rub" not in tgt:
+        tgt["min_transaction_rub"] = {cls: 10000.0 for cls in editor_classes}
+    editor_min_trans = dict(tgt.get("min_transaction_rub", {}))
+
+    # Заголовки колонок: Иконка+Название | Целевой вес | Мин. отклонение | Мин. сумма сделки
+    hdr = st.columns([2, 2, 2, 2, 1])
+    hdr[0].markdown("**Класс активов**")
+    hdr[1].markdown("**Целевой вес, %**")
+    hdr[2].markdown("**Мин. отклонение, %**")
+    hdr[3].markdown("**Мин. сумма сделки, руб.**")
+    st.markdown("---")
+
+    # По одному классу на строку — визуально понятно
     for cls_name in sorted(editor_classes.keys()):
-        ci = idx % 4
-        val = cols_c[ci].number_input(
-            f"{_get_class_icon(cls_name)} {cls_name}",
+        row = st.columns([2, 2, 2, 2, 1])
+        row[0].markdown(f"{_get_class_icon(cls_name)} **{cls_name}**")
+        val = row[1].number_input(
+            f"Целевой вес {cls_name}",
             min_value=0.0, max_value=100.0,
             value=float(editor_classes.get(cls_name, 0)), step=0.5,
-            label_visibility="visible", key=f"tc_{cls_name}",
+            label_visibility="collapsed", key=f"tc_{cls_name}",
             on_change=lambda: setattr(st.session_state, 'targets_edited', True))
         editor_classes[cls_name] = val
-        idx += 1
+        min_dev = row[2].number_input(
+            f"Мин. отклонение {cls_name}",
+            min_value=0.0, max_value=100.0,
+            value=float(editor_min_dev.get(cls_name, 1.0)), step=0.5,
+            label_visibility="collapsed", key=f"tc_min_dev_{cls_name}",
+            on_change=lambda: setattr(st.session_state, 'targets_edited', True))
+        editor_min_dev[cls_name] = min_dev
+        min_trans = row[3].number_input(
+            f"Мин. сумма {cls_name}",
+            min_value=0.0, max_value=1000000.0,
+            value=float(editor_min_trans.get(cls_name, 10000.0)), step=100.0,
+            label_visibility="collapsed", key=f"tc_min_trans_{cls_name}",
+            on_change=lambda: setattr(st.session_state, 'targets_edited', True))
+        editor_min_trans[cls_name] = min_trans
 
     # Добавить новый класс
     new_class_name = st.text_input("➕ Новый класс:", placeholder="Название нового класса", key="new_class_input")
@@ -1444,6 +1533,8 @@ def page_targets_editor():
                 # Сохраняем классы, сохраняя тикеры из session_state
                 current = load_targets()
                 current["classes"] = editor_classes
+                current["min_deviation_pct"] = editor_min_dev
+                current["min_transaction_rub"] = editor_min_trans
                 # Важно: сохраняем текущие тикеры из session_state, а не из файла
                 current["tickers"] = st.session_state.targets.get("tickers", {})
                 st.session_state.targets = current
@@ -1566,6 +1657,8 @@ def page_targets_editor():
                 "tickers": final_tickers,
                 "futures_overlay_classes": overlay_classes,
                 "futures_buffer_pct": buffer_pct,
+                "min_deviation_pct": editor_min_dev,
+                "min_transaction_rub": editor_min_trans,
             }
             st.session_state.targets = final_tgt
             if save_targets(final_tgt):
@@ -1629,6 +1722,17 @@ def _targets_equal(targets1, targets2):
     buffer1 = targets1.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT)
     buffer2 = targets2.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT)
     if buffer1 != buffer2:
+        return False
+    
+    # Сравниваем минимальные отклонения
+    min_dev1 = targets1.get("min_deviation_pct", {})
+    min_dev2 = targets2.get("min_deviation_pct", {})
+    if min_dev1 != min_dev2:
+        return False
+    # Сравниваем минимальные суммы сделок
+    min_trans1 = targets1.get("min_transaction_rub", {})
+    min_trans2 = targets2.get("min_transaction_rub", {})
+    if min_trans1 != min_trans2:
         return False
     
     return True
