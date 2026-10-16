@@ -307,6 +307,53 @@ def fetch_portfolio_directly(qp_provider, account='L01-00000F00', limit_kind=1):
 # ПАРСЕР ПОРТФЕЛЯ
 # ════════════════════════════════════════════════════════════════════════════
 
+def extract_ticker_names_from_portfolio(text: str) -> dict:
+    """
+    Извлекает словарь {ticker: name} из текста портфеля (direct_portfolio.txt).
+    Используется для автозаполнения названий тикеров в редакторе целей.
+    """
+    if not text:
+        return {}
+    
+    names = {}
+    lines = text.split('\n')
+    
+    # Ищем строки в формате: Ticker  Class  Name  Qty  Price  Sum
+    # Пример: "AKMC           TQBR       AKMC ETF                             22      1321.0000         29062.00"
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        
+        ticker = parts[0]
+        # Пропускаем заголовки и разделители
+        if ticker in ('Тикер', 'Итого', 'Счёт:', 'СРОЧНЫЙ', 'ФОНДОВЫЙ'):
+            continue
+        if re.match(r'^[=\-#]+$', ticker):
+            continue
+        if re.match(r'^\d{2}\.\d{2}\.\d{4}', line):
+            continue
+        
+        # Извлекаем название - всё между классом (parts[1]) и количеством (parts[-3])
+        # Название может содержать пробелы
+        try:
+            # Проверяем, что parts[1] похож на код класса (TQBR, TQCB и т.д.)
+            class_code = parts[1]
+            if not re.match(r'^TQ[A-Z]{2}$|^SPBFUT|^CETS', class_code):
+                continue
+            
+            # Название - это всё между parts[1] и parts[-3]
+            name_parts = parts[2:-3]
+            name = ' '.join(name_parts).strip()
+            
+            if name and ticker not in names:
+                names[ticker] = name
+        except (IndexError, ValueError):
+            continue
+    
+    return names
+
+
 def parse_portfolio(text: str) -> dict:
     raw_lines = text.split('\n')
     lines = []
@@ -618,6 +665,7 @@ def load_targets() -> dict:
                 d = json.load(f)
             if "classes" not in d: d["classes"] = DEFAULT_CLASSES.copy()
             if "tickers" not in d: d["tickers"] = {}
+            if "tickers_names" not in d: d["tickers_names"] = {}
             if "futures_overlay_tickers" not in d: d["futures_overlay_tickers"] = {}
             if "futures_buffer_pct" not in d: d["futures_buffer_pct"] = DEFAULT_FUTURES_BUFFER_PCT
             if "min_deviation_pct" not in d:
@@ -644,6 +692,7 @@ def _default_targets() -> dict:
     d = {
         "classes": DEFAULT_CLASSES.copy(), 
         "tickers": {},
+        "tickers_names": {},
         "futures_overlay_tickers": {},
         "futures_buffer_pct": DEFAULT_FUTURES_BUFFER_PCT,
         "min_deviation_pct": {cls: 1.0 for cls in DEFAULT_CLASSES},
@@ -798,6 +847,7 @@ def page_analysis():
 
     # Парсим из сохранённого текста (если есть)
     parsed = parse_portfolio(st.session_state.raw_portfolio_text) if st.session_state.raw_portfolio_text else None
+    st.session_state.parsed = parsed
 
     # ── Sidebar: загрузка данных ──
     with st.sidebar:
@@ -1427,10 +1477,27 @@ def page_targets_editor():
         st.session_state.initial_targets = load_targets()
 
     tgt = st.session_state.targets
+
+    # Восстанавливаем parsed, если его нет: из загруженного текста или из direct_portfolio.txt
+    if st.session_state.parsed is None:
+        _t = st.session_state.get("raw_portfolio_text") or ""
+        if not _t and DIRECT_DATA_FILE.exists():
+            try:
+                with open(DIRECT_DATA_FILE, encoding="utf-8") as f:
+                    _t = f.read()
+            except Exception:
+                _t = ""
+        if _t:
+            try:
+                st.session_state.parsed = parse_portfolio(_t)
+            except Exception:
+                st.session_state.parsed = None
+
     parsed = st.session_state.parsed
 
     editor_classes = dict(tgt.get("classes", {}))
     editor_tickers = tgt.get("tickers", {}).copy()
+    editor_names = tgt.get("tickers_names", {}).copy()
     
     overlay_tickers = tgt.get("futures_overlay_tickers", {})
     buffer_pct = float(tgt.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT))
@@ -1568,8 +1635,9 @@ def page_targets_editor():
                     with row[0]:
                         st.write(tk)
                     with row[1]:
-                        # Пустая колонка для названия (можно оставить пустой или убрать позже)
-                        st.markdown("")
+                        # Показываем название тикера (из titles_names) или пусто
+                        current_name = editor_names.get(cls_name, {}).get(tk, "")
+                        st.write(current_name if current_name else "—")
                     with row[2]:
                         wt_text = st.text_input("", value=f"{float(ct[tk]):.1f}",
                                                key=f"tc_tick_text_{cls_name}_{tk}",
@@ -1609,11 +1677,55 @@ def page_targets_editor():
                 if st.button("<- Добавить введенное", use_container_width=True, key=f"add_btn_{cls_name}"):
                     if new_tk:
                         if cls_name not in editor_tickers: editor_tickers[cls_name] = {}
+                        if cls_name not in editor_names: editor_names[cls_name] = {}
                         editor_tickers[cls_name][new_tk] = new_wt
+                        editor_names[cls_name][new_tk] = new_nm
                         st.session_state.targets["tickers"] = editor_tickers
+                        st.session_state.targets["tickers_names"] = editor_names
                         st.rerun()
 
             # Подтяжка из портфеля
+            # ── Автозаполнение пустых названий (работает независимо от parsed) ──
+            portfolio_text = st.session_state.get("raw_portfolio_text") or ""
+            if not portfolio_text and DIRECT_DATA_FILE.exists():
+                try:
+                    with open(DIRECT_DATA_FILE, encoding="utf-8") as f:
+                        portfolio_text = f.read()
+                except Exception:
+                    portfolio_text = ""
+
+            prev_filled = st.session_state.pop(f"_names_filled_{cls_name}", None)
+            if prev_filled is not None:
+                if prev_filled > 0:
+                    st.success(f"✅ Заполнено названий: {prev_filled}")
+                else:
+                    st.warning("В отчёте не найдено названий для пустых тикеров")
+
+            if portfolio_text and ct:
+                ticker_names_map = extract_ticker_names_from_portfolio(portfolio_text)
+                cls_names_dict = editor_names.get(cls_name, {}) or {}
+
+                empty_tickers = []
+                for t in ct:
+                    cur_name = cls_names_dict.get(t, "")
+                    if (not cur_name or not str(cur_name).strip()) and t in ticker_names_map:
+                        empty_tickers.append(t)
+
+                if empty_tickers:
+                    if st.button(
+                            f"🏷️ Автозаполнить пустые названия ({len(empty_tickers)})",
+                            use_container_width=True,
+                            key=f"autoname_{cls_name}",
+                    ):
+                        if cls_name not in editor_names:
+                            editor_names[cls_name] = {}
+                        for t in empty_tickers:
+                            editor_names[cls_name][t] = ticker_names_map[t]
+                        st.session_state.targets["tickers_names"] = editor_names
+                        st.session_state[f"_names_filled_{cls_name}"] = len(empty_tickers)
+                        st.rerun()
+
+            # ── Подтянуть тикеры из портфеля (если parsed доступен) ──
             if parsed:
                 port_tickers = [p["sec_code"] for p in parsed["positions"]
                                 if classify_asset(p["class_code"], p["sec_code"]) == cls_name]
@@ -1621,7 +1733,8 @@ def page_targets_editor():
                 available = list(dict.fromkeys(port_tickers + fut_tickers))
                 if available and any(t not in ct for t in available):
                     st.caption(f"Из портфеля доступны: {', '.join(available)}")
-                    if st.button("📥 Подтянуть из портфеля", use_container_width=True, key=f"fetch_{cls_name}"):
+                    if st.button("📥 Подтянуть из портфеля", use_container_width=True,
+                                 key=f"fetch_{cls_name}"):
                         existing = set(editor_tickers.setdefault(cls_name, {}).keys())
                         for t in available:
                             if t not in existing:
@@ -1658,6 +1771,7 @@ def page_targets_editor():
             final_tgt = {
                 "classes": editor_classes,
                 "tickers": final_tickers,
+                "tickers_names": editor_names,
                 "futures_overlay_tickers": overlay_tickers,
                 "futures_buffer_pct": buffer_pct,
                 "min_deviation_pct": editor_min_dev,
