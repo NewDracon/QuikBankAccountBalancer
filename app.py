@@ -1536,28 +1536,9 @@ def page_targets_editor():
     else:
         st.error(f"❌ {status_msg} — должно быть 100.0%")
 
-    # Кнопки управления классами
-    btn_row = st.columns(3)
-    with btn_row[0]:
-        if st.button("💾 Сохранить классы", use_container_width=True):
-            if abs(class_sum - 100.0) <= 0.1:
-                if hasattr(st.session_state, '_pending_new_class') and st.session_state._pending_new_class:
-                    nc = st.session_state._pending_new_class
-                    del st.session_state._pending_new_class
-                    editor_classes[nc] = 0.0
-                # Сохраняем классы, сохраняя тикеры из session_state
-                current = load_targets()
-                current["classes"] = editor_classes
-                current["min_deviation_pct"] = editor_min_dev
-                current["min_transaction_rub"] = editor_min_trans
-                # Важно: сохраняем текущие тикеры из session_state, а не из файла
-                current["tickers"] = st.session_state.targets.get("tickers", {})
-                st.session_state.targets = current
-                st.session_state.targets_edited = False  # Сброс флага изменений
-                save_targets(current); st.rerun()
-    with btn_row[1]:
-        if st.button("🔄 Сбросить к дефолту", use_container_width=True):
-            _default_targets(); st.rerun()
+    # Кнопка сброса к дефолту
+    if st.button("🔄 Сбросить к дефолту", use_container_width=True):
+        _default_targets(); st.rerun()
 
     # ── Секция 2: Инструменты внутри классов ──
     st.divider()
@@ -1573,30 +1554,37 @@ def page_targets_editor():
             if keys:
                 st.markdown("**Текущие инструменты:**")
                 for tk in keys:
-                    row = st.columns(4)
+                    row = st.columns([2, 3, 1, 1])
                     with row[0]:
+                        st.markdown("<small>тикер</small>", unsafe_allow_html=True)
+                    with row[1]:
+                        st.markdown("<small>название</small>", unsafe_allow_html=True)
+                    with row[2]:
+                        st.markdown("<small>вес %</small>", unsafe_allow_html=True)
+                    with row[3]:
+                        st.markdown("<small>удалить</small>", unsafe_allow_html=True)
+                    # данные строки
+                    row = st.columns([2, 3, 1, 1])
+                    with row[0]:
+                        st.write(tk)
+                    with row[1]:
+                        # Пустая колонка для названия (можно оставить пустой или убрать позже)
+                        st.markdown("")
+                    with row[2]:
+                        wt_text = st.text_input("", value=f"{float(ct[tk]):.1f}",
+                                               key=f"tc_tick_text_{cls_name}_{tk}",
+                                               label_visibility="collapsed")
+                        try:
+                            tv = float(wt_text.replace(',', '.'))
+                        except (ValueError, TypeError):
+                            tv = float(ct[tk])
+                        editor_tickers[cls_name][tk] = tv
+                        st.session_state.targets["tickers"] = editor_tickers
+                    with row[3]:
                         if st.button("🗑", key=f"del_{cls_name}_{tk}"):
                             del editor_tickers.setdefault(cls_name, {})[tk]
                             st.session_state.targets["tickers"] = editor_tickers
                             st.rerun()
-                    with row[1]:
-                        st.write(tk)
-                    with row[2]:
-                        rename_ok = False
-                        nn = st.text_input("", value=tk, key=f"rename_{cls_name}_{tk}",
-                                           label_visibility="collapsed", max_chars=20)
-                        if nn and nn != tk:
-                            editor_tickers[cls_name][nn] = editor_tickers[cls_name].pop(tk)
-                            st.session_state.targets["tickers"] = editor_tickers
-                            st.rerun()
-                    with row[3]:
-                        tv = st.number_input(
-                            "", min_value=0.0, max_value=100.0,
-                            value=float(ct[tk]), step=0.5, format="%.1f",
-                            key=f"tc_tick_{cls_name}_{tk}", label_visibility="visible")
-                        # Обновляем данные в session_state, чтобы они сохранялись
-                        editor_tickers[cls_name][tk] = tv
-                        st.session_state.targets["tickers"] = editor_tickers
 
                 s = sum(editor_tickers[cls_name].values())
                 if abs(s - 100.0) > 0.1:
@@ -1642,11 +1630,11 @@ def page_targets_editor():
                         st.session_state.targets["tickers"] = editor_tickers
                         st.rerun()
 
-    # ── Кнопки сохранения всей секции B ──
+    # ── Кнопка сохранения всей секции B ──
     st.divider()
     btn_cols = st.columns(4)
     with btn_cols[0]:
-        if st.button("💾 Сохранить все цели", use_container_width=True):
+        if st.button("💾 Сохранить", use_container_width=True):
             # Используем введённые пользователем веса, нормализуя только если сумма ≠ 100%
             final_tickers = {}
             for cn, td in editor_tickers.items():
