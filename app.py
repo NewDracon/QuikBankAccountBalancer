@@ -429,7 +429,7 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
     classes_data = targets.get("classes", {})
     tickers_targets = targets.get("tickers", {})
     buffer_pct = float(targets.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT))
-    overlay_cls = targets.get("futures_overlay_classes", OVERLAY_DEFAULT_CLASSES)
+    overlay_tickers = targets.get("futures_overlay_tickers", {})
     min_dev_pct = targets.get("min_deviation_pct", {cls: 1.0 for cls in classes_data.keys()})
     min_trans_rub = targets.get("min_transaction_rub", {cls: 10000.0 for cls in classes_data.keys()})
 
@@ -455,19 +455,12 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
     remaining_for_overlay = round(sur_val - fut_required_liquidity, 2)
     if remaining_for_overlay < 0: remaining_for_overlay = 0.0
 
-    # Распределяем remaining поверх классов по их текущим весам в фондовом рынке
+    # Распределяем remaining поверх конкретных тикеров из overlay_tickers с их процентами
     overlay_alloc = {}
-    if overlay_cls and remaining_for_overlay > 0:
-        class_store_raw = {}
-        for p in raw["positions"]:
-            cls = classify_asset(p["class_code"], p["sec_code"])
-            if cls in overlay_cls:
-                class_store_raw[cls] = class_store_raw.get(cls, 0) + p["value"]
-        total_overlay_base = sum(class_store_raw.values()) or 1
-        for cls_name in overlay_cls:
-            cls_val = class_store_raw.get(cls_name, 0)
-            ratio = cls_val / total_overlay_base
-            overlay_alloc[cls_name] = round(remaining_for_overlay * ratio, 2)
+    if overlay_tickers and remaining_for_overlay > 0:
+        total_w = sum(overlay_tickers.values()) or 1
+        for tk, w in overlay_tickers.items():
+            overlay_alloc[tk] = round(remaining_for_overlay * w / 100.0, 2)
 
     # ── Сбор позиций по классам ──
     class_store = {}
@@ -625,7 +618,7 @@ def load_targets() -> dict:
                 d = json.load(f)
             if "classes" not in d: d["classes"] = DEFAULT_CLASSES.copy()
             if "tickers" not in d: d["tickers"] = {}
-            if "futures_overlay_classes" not in d: d["futures_overlay_classes"] = OVERLAY_DEFAULT_CLASSES[:]
+            if "futures_overlay_tickers" not in d: d["futures_overlay_tickers"] = {}
             if "futures_buffer_pct" not in d: d["futures_buffer_pct"] = DEFAULT_FUTURES_BUFFER_PCT
             if "min_deviation_pct" not in d:
                 d["min_deviation_pct"] = {cls: 1.0 for cls in d.get("classes", DEFAULT_CLASSES)}
@@ -651,7 +644,7 @@ def _default_targets() -> dict:
     d = {
         "classes": DEFAULT_CLASSES.copy(), 
         "tickers": {},
-        "futures_overlay_classes": OVERLAY_DEFAULT_CLASSES[:],
+        "futures_overlay_tickers": {},
         "futures_buffer_pct": DEFAULT_FUTURES_BUFFER_PCT,
         "min_deviation_pct": {cls: 1.0 for cls in DEFAULT_CLASSES},
         "min_transaction_rub": {cls: 10000.0 for cls in DEFAULT_CLASSES},
@@ -1439,7 +1432,7 @@ def page_targets_editor():
     editor_classes = dict(tgt.get("classes", {}))
     editor_tickers = tgt.get("tickers", {}).copy()
     
-    overlay_classes = tgt.get("futures_overlay_classes", OVERLAY_DEFAULT_CLASSES[:])
+    overlay_tickers = tgt.get("futures_overlay_tickers", {})
     buffer_pct = float(tgt.get("futures_buffer_pct", DEFAULT_FUTURES_BUFFER_PCT))
 
     # ── Секция 0: Параметры фьючерсов ──
@@ -1453,11 +1446,33 @@ def page_targets_editor():
                 format="%.1f", key="edit_buf_pct",
                 on_change=lambda: setattr(st.session_state, 'targets_edited', True))
         with c2:
-            st.markdown("**Overlay-классы** (куда распределяется излишек ликвидности):")
-            overlay_classes = st.multiselect(
-                "", options=OVERLAY_DEFAULT_CLASSES,
-                default=overlay_classes, key="edit_overlay_cls",
-                on_change=lambda: setattr(st.session_state, 'targets_edited', True))
+            st.markdown("**Overlay-тикеры** (для свободного остатка, % внутри остатка):")
+            overlay_tickers = tgt.get("futures_overlay_tickers", {})
+            # Ввод тикеров с процентами для распределения внутри свободного остатка
+            new_ov_tk = st.text_input("Тикер", placeholder="например, SBER", key="edit_ov_tk", label_visibility="collapsed")
+            new_ov_w = st.number_input("Вес %", min_value=0.0, max_value=100.0, value=0.0, step=5.0, key="edit_ov_w", format="%.1f", label_visibility="collapsed")
+            if st.button("➕ Добавить overlay-тикер", use_container_width=True, key="add_ov_btn"):
+                if new_ov_tk:
+                    overlay_tickers = overlay_tickers.copy()
+                    overlay_tickers[new_ov_tk] = new_ov_w
+                    tgt["futures_overlay_tickers"] = overlay_tickers
+                    st.session_state.targets = tgt
+                    st.session_state.targets_edited = True
+                    st.rerun()
+            if overlay_tickers:
+                st.markdown("**Заданные тикеры:**")
+                for tk, w in list(overlay_tickers.items()):
+                    col_t, col_w, col_d = st.columns([2, 1, 1])
+                    col_t.write(tk)
+                    col_w.write(f"{w}%")
+                    if col_d.button("🗑", key=f"del_ov_{tk}"):
+                        overlay_tickers.pop(tk, None)
+                        tgt["futures_overlay_tickers"] = overlay_tickers
+                        st.session_state.targets = tgt
+                        st.session_state.targets_edited = True
+                        st.rerun()
+            # Убираем overlay_classes переменную так как она больше не нужна в UI
+            overlay_classes = []
         with c3:
             st.empty()
 
@@ -1655,7 +1670,7 @@ def page_targets_editor():
             final_tgt = {
                 "classes": editor_classes,
                 "tickers": final_tickers,
-                "futures_overlay_classes": overlay_classes,
+                "futures_overlay_tickers": overlay_tickers,
                 "futures_buffer_pct": buffer_pct,
                 "min_deviation_pct": editor_min_dev,
                 "min_transaction_rub": editor_min_trans,
@@ -1714,8 +1729,8 @@ def _targets_equal(targets1, targets2):
         return False
     
     # Сравниваем параметры фьючерсов
-    futures_overlay1 = targets1.get("futures_overlay_classes", [])
-    futures_overlay2 = targets2.get("futures_overlay_classes", [])
+    futures_overlay1 = targets1.get("futures_overlay_tickers", {})
+    futures_overlay2 = targets2.get("futures_overlay_tickers", {})
     if futures_overlay1 != futures_overlay2:
         return False
     
