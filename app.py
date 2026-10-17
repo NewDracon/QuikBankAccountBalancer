@@ -545,15 +545,26 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
     if has_futures:
         # Фьючерсы = наличность + стоимость overlay-тикеров из портфеля
         futures_class_value = sur_val + overlay_value_in_portfolio
-        add_ticker("Фьючерсы", {"sec": "FUTURES", "name": "Фьючерсы",
-            "qty": None, "price": 1.0, "value": futures_class_value})
+        # Целевое значение класса «Фьючерсы» в рублях
+        tgt_fut_total = classes_data.get("Фьючерсы", 0) / 100 * equity
+        if futures_class_value > tgt_fut_total and tgt_fut_total > 0:
+            # Текущие фьючерсы превышают цель: в class_store кладём целевое
+            # значение «Фьючерсы», а избыточную ликвидность — в «Ликвидность».
+            add_ticker("Фьючерсы", {"sec": "FUTURES", "name": "Фьючерсы",
+                "qty": None, "price": 1.0, "value": tgt_fut_total})
+            add_ticker("Ликвидность", {"sec": "SUR", "name": "Ликвидность (остаток)",
+                "qty": None, "price": 1.0, "value": round(futures_class_value - tgt_fut_total, 2)})
+        else:
+            add_ticker("Фьючерсы", {"sec": "FUTURES", "name": "Фьючерсы",
+                "qty": None, "price": 1.0, "value": futures_class_value})
     elif sur_val > 0:
         # Без фьючерсов — просто ликвидность (наличность)
         add_ticker("Ликвидность", {"sec": "SUR", "name": "Ликвидность",
             "qty": None, "price": 1.0, "value": sur_val})
 
-    # Фьючерсы НЕ включаем в левую диаграмму "Текущее распределение" напрямую,
-    # но при наличии фьючерсов показываем класс "Фьючерсы" вместо "Ликв. для фьючерсов"
+    # Класс «Фьючерсы» = наличность + overlay-тикеры (в class_store уже
+    # разложено по «Фьючерсы» / «Ликвидность», поэтому отдельной манипуляции
+    # в графике больше не нужно — class_store содержит правильные значения).
 
     # Предупреждения
     for sec, cls in ticker_class_map.items():
@@ -1057,42 +1068,10 @@ def page_analysis():
     gcol1, gcol2 = st.columns(2)
 
     with gcol1:
-        # Условие: если текущие фьючерсы (наличность+overlay) больше целевых
-        # - разбиваем на 2 сектора: Фьючерсы (целевое значение) + Ликвидность (остаток)
-        # Иначе: как раньше - один сектор Фьючерсы
+        # class_store теперь содержит правильные значения для "Фьючерсы" и "Ликвидность",
+        # поэтому можно брать их напрямую.
         vals = [result["class_store"].get(c, {}).get("total", 0) for c in cl]
-        futures_cl = "Фьючерсы"
-        cur_fut_total = result["class_store"].get(futures_cl, {}).get("total", 0)
-        tgt_fut_total = result["classes_data"].get(futures_cl, 0) / 100 * result["equity"]
-        if cur_fut_total > tgt_fut_total and cur_fut_total > 0:
-            # Два сектора в текущей диаграмме
-            cur_vals_display = vals[:]  # копия
-            # Заменяем Фьючерсы на целевое значение
-            fut_idx = cl.index(futures_cl) if futures_cl in cl else -1
-            if fut_idx >= 0:
-                # Фьючерсы = целевое значение
-                cur_vals_display[fut_idx] = tgt_fut_total
-                # Ликвидность = остаток (текущие - целевые)
-                liq_total = cur_fut_total - tgt_fut_total
-                # Добавляем Ликвидность в диаграмму, если её нет или обновляем
-                if "Ликвидность" not in cl:
-                    cur_vals_display.append(liq_total)
-                    cur_labels_display = cl + ["Ликвидность"]
-                    cur_colors_display = _stable_colors(cur_labels_display)
-                else:
-                    liq_idx = cl.index("Ликвидность")
-                    cur_vals_display[liq_idx] = liq_total
-                    cur_labels_display = cl[:]
-                    cur_colors_display = _stable_colors(cur_labels_display)
-            else:
-                cur_vals_display = vals[:]
-                cur_labels_display = cl[:]
-                cur_colors_display = _stable_colors(cl)
-        else:
-            cur_vals_display = vals[:]
-            cur_labels_display = cl[:]
-            cur_colors_display = _stable_colors(cl)
-        st.plotly_chart(make_pie_chart(cur_vals_display, cur_labels_display, "📊 Текущее распределение", cur_colors_display),
+        st.plotly_chart(make_pie_chart(vals, cl, "📊 Текущее распределение", _stable_colors(cl)),
                         use_container_width=True)
     with gcol2:
         tgt_vals = [result["classes_data"].get(c, 0) / 100 * result["equity"] for c in cl]
@@ -1105,23 +1084,13 @@ def page_analysis():
     with rub_col1:
         st.markdown(f"<div style='border:1px solid #ddd;border-radius:8px;padding:10px;margin-top:4px;background:#fafafa'>"
                      f"<b>📊 Текущее (₽)</b>", unsafe_allow_html=True)
-        # Легенда отображается на основе cur_vals_display / cur_labels_display
-        if "cur_labels_display" in locals():
-            for ci, c in enumerate(cur_labels_display):
-                v = cur_vals_display[ci]
-                if v <= 0: continue
-                color = _CLASS_COLOR_MAP.get(c, "#999")
-                st.markdown(
-                    f"• <span style='color:{color}'>●</span> **{c}**: {v:,.0f} ₽ ({v/result['equity']*100:.1f}%)",
-                    unsafe_allow_html=True)
-        else:
-            for ci, c in enumerate(cl):
-                v = vals[ci]
-                if v <= 0: continue
-                color = _CLASS_COLOR_MAP[c]
-                st.markdown(
-                    f"• <span style='color:{color}'>●</span> **{c}**: {v:,.0f} ₽ ({v/result['equity']*100:.1f}%)",
-                    unsafe_allow_html=True)
+        for ci, c in enumerate(cl):
+            v = vals[ci]
+            if v <= 0: continue
+            color = _CLASS_COLOR_MAP[c]
+            st.markdown(
+                f"• <span style='color:{color}'>●</span> **{c}**: {v:,.0f} ₽ ({v/result['equity']*100:.1f}%)",
+                unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with rub_col2:
