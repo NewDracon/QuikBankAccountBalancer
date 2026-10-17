@@ -638,6 +638,57 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
             else:
                 skipped[(cn, sec)] = "Тикер отсутствует в цели"
 
+    # ── Рекомендации по overlay-тикерам из структуры обеспечения ──
+    overlay_recs = {}
+    overlay_tickers = targets.get("futures_overlay_tickers", {})
+    # Номинал из текущей структуры обеспечения (аналогично page_analysis):
+    # cur_fut_total = sur_val + overlay_value_in_portfolio
+    # Если cur_fut_total > tgt_fut_total (целевой фьючерс), номинал = целевое значение
+    # Иначе номинал = фактический (реальный)
+    overlay_value_in_portfolio = sum(p.get("value", 0) for p in raw.get("positions", []) if p.get("sec_code") in overlay_tickers)
+    cur_fut_total_for_ov = sur_val + overlay_value_in_portfolio
+    tgt_fut_total_for_ov = classes_data.get("Фьючерсы", 0) / 100 * equity
+    if cur_fut_total_for_ov > tgt_fut_total_for_ov and tgt_fut_total_for_ov > 0:
+        cur_nominal_for_overlay = round(tgt_fut_total_for_ov, 2)
+    else:
+        cur_nominal_for_overlay = round(cur_fut_total_for_ov, 2)
+    # ГО = из отчёта
+    cur_go_for_overlay = total_fut_margin if total_fut_margin > 0 else go
+    # Целевой буфер = номинал × процент буфера из редактора
+    tgt_buffer_for_overlay = round(cur_nominal_for_overlay * buffer_pct / 100.0, 2)
+    # Свободный остаток = номинал - ГО - целевой буфер (как в целевой структуре)
+    remaining_for_overlay_calc = round(cur_nominal_for_overlay - cur_go_for_overlay - tgt_buffer_for_overlay, 2)
+    if remaining_for_overlay_calc < 0:
+        remaining_for_overlay_calc = 0.0
+    if overlay_tickers:
+        total_w_ov = sum(overlay_tickers.values()) or 1
+        for tk, w in overlay_tickers.items():
+            current_value_ov = sum(p.get("value", 0) for p in raw.get("positions", []) if p.get("sec_code") == tk)
+            # Целевое значение = вес % от оставшегося остатка
+            target_value_ov = round(remaining_for_overlay_calc * w / 100.0, 2)
+            # Если тикер уже куплен — вычитаем текущую стоимость из целевой для расчёта разницы
+            # Но не больше, чем целевое (если куплено больше цели — это избыточная позиция)
+            # Разница = целевая сумма - текущая сумма (если > 0 — докупать, < 0 — продать излишек)
+            diff_ov = round(target_value_ov - current_value_ov, 2)
+            action_ov = "Покупка" if diff_ov > 0.5 else ("Продажа" if diff_ov < -0.5 else "Без изменений")
+            cur_pct_of_remaining = round(current_value_ov / remaining_for_overlay_calc * 100, 2) if remaining_for_overlay_calc > 0 else 0
+            qty_change = 0
+            # Рассчитываем количество для покупки/продажи если есть текущая цена
+            price_ov = next((p.get("price", 0) for p in raw.get("positions", []) if p.get("sec_code") == tk), 0)
+            if price_ov > 0 and diff_ov != 0:
+                qty_change = round(abs(diff_ov) / price_ov) if abs(diff_ov) > 0.5 else 0
+            overlay_recs[tk] = {
+                "action": action_ov,
+                "amount_rub": round(max(0, diff_ov), 2),
+                "percent": w,
+                "current_value": round(current_value_ov, 2),
+                "current_pct": round(cur_pct_of_remaining, 2),
+                "target_pct": round(float(w), 2),
+                "deviation_pct": round(cur_pct_of_remaining - float(w), 2),
+                "diff_rub": round(diff_ov, 2),
+                "qty_change": qty_change,
+            }
+
     # ── Данные для фьючерсной диаграммы ──
     fut_chart_data = {
         "total_nominal": total_fut_nominal,
@@ -647,6 +698,7 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
         "required_liquidity": fut_required_liquidity,
         "sur_available": sur_val,
         "remaining_for_overlay": remaining_for_overlay,
+        "remaining_for_overlay_calc": remaining_for_overlay_calc if 'remaining_for_overlay_calc' in locals() else 0,
         "overlay_alloc": overlay_alloc,
         "overlay_total": sum(overlay_alloc.values()),
         "per_future": [],
@@ -669,6 +721,7 @@ def calc_portfolio(raw: dict, targets: dict) -> dict:
         "ticker_devs": ticker_devs, "skipped": skipped,
         "warnings": warnings_list, "classes_data": classes_data,
         "fut_chart_data": fut_chart_data, "overlay_alloc": overlay_alloc,
+        "overlay_recs": overlay_recs,
     }
 
 
@@ -1320,6 +1373,35 @@ def page_analysis():
                 })
             df_rec = pd.DataFrame(rec_rows)
             st.dataframe(df_rec.style.map(
+                lambda v: "background:#27ae60;color:#000000;font-weight:bold;" if v == "Покупка" else
+                ("background:#e74c3c;color:#000000;font-weight:bold;" if v == "Продажа" else ""),
+                subset=["Действие"]),
+                use_container_width=True, hide_index=True)
+
+        # ── Рекомендации по overlay-тикерам ──
+        if result.get("overlay_recs"):
+            st.divider()
+            st.subheader("💡 Рекомендации по overlay-тикерам")
+            st.caption(f"Свободный остаток: {result['fut_chart_data'].get('remaining_for_overlay_calc', 0):,.2f} ₽ "
+                      f"(номинал - ГО - буфер {float(targets.get('futures_buffer_pct', DEFAULT_FUTURES_BUFFER_PCT))}%)")
+            rec_rows = []
+            for tk, rec in result["overlay_recs"].items():
+                cur_wt = rec.get("current_pct", 0)
+                tgt_wt = rec.get("target_pct", 0)
+                dev_pct = rec.get("deviation_pct", 0)
+                rec_rows.append({
+                    "Тикер": tk,
+                    "Действие": rec["action"],
+                    "Текущий %": f"{cur_wt:.1f}%",
+                    "Целевой %": f"{tgt_wt:.1f}%",
+                    "Отклонение %": f"{dev_pct:+.1f}%",
+                    "Разница (₽)": f"{rec['diff_rub']:,.2f}",
+                    "Количество": f"{rec['qty_change']}",
+                    "Действие": rec["action"],
+                    "Текущая стоимость": f"{rec['current_value']:,.2f}",
+                })
+            df_ov = pd.DataFrame(rec_rows)
+            st.dataframe(df_ov.style.map(
                 lambda v: "background:#27ae60;color:#000000;font-weight:bold;" if v == "Покупка" else
                 ("background:#e74c3c;color:#000000;font-weight:bold;" if v == "Продажа" else ""),
                 subset=["Действие"]),
